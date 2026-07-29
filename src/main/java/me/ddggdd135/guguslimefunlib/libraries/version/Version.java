@@ -35,7 +35,8 @@ public enum Version {
     v1_22_R3,
     v1_23_R1,
     v1_23_R2,
-    v1_23_R3;
+    v1_23_R3,
+    UNKNOWN;
 
     @Getter
     private Integer value;
@@ -47,6 +48,7 @@ public enum Version {
 
     private static int subVersion = 0;
     private static Version current = null;
+    private static Integer fallbackCurrentValue = null;
     private static MinecraftPlatform platform = null;
 
     static {
@@ -80,10 +82,16 @@ public enum Version {
     }
 
     public String getShortFormated() {
+        if (this == UNKNOWN) {
+            return deconvertVersion(getCurrentVersionValue()) + ".x";
+        }
         return shortVersion.replace("v", "").replace("_", ".") + ".x";
     }
 
     public String getFormated() {
+        if (this == UNKNOWN) {
+            return deconvertVersion(getCurrentVersionValue());
+        }
         return shortVersion.replace("v", "").replace("_", ".") + "." + subVersion;
     }
 
@@ -188,43 +196,102 @@ public enum Version {
             }
         }
 
+        // Fallback: if no enum entry matches, compute a comparable value from the Bukkit version
+        // string directly and use the UNKNOWN sentinel. This handles new versioning schemes
+        // (e.g. "26.2") that don't have corresponding enum entries yet.
+        if (current == null) {
+            fallbackCurrentValue = computeValueFromBukkitVersion();
+            if (fallbackCurrentValue != null) {
+                current = UNKNOWN;
+                UNKNOWN.value = fallbackCurrentValue;
+                Bukkit.getConsoleSender()
+                        .sendMessage("§c[GuguSlimefunLib] §eUnknown server version: "
+                                + Bukkit.getBukkitVersion()
+                                + ". Using fallback comparison — plugin may need an update.");
+            }
+        }
+
         return current;
     }
 
+    /**
+     * Computes a comparable integer value from the raw Bukkit version string.
+     * Returns null if parsing fails.
+     */
+    private static Integer computeValueFromBukkitVersion() {
+        try {
+            String v = Bukkit.getBukkitVersion().split("-", 2)[0];
+            return convertVersion(v);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns the comparable version value for the current server.
+     * When {@link #getCurrent()} returns null (unknown version), this falls back to a value
+     * computed directly from {@code Bukkit.getBukkitVersion()}, ensuring comparisons never NPE.
+     */
+    private static int getCurrentVersionValue() {
+        if (current != null) {
+            Integer v = current.getValue();
+            return v != null ? v : 0;
+        }
+        if (fallbackCurrentValue != null) {
+            return fallbackCurrentValue;
+        }
+        fallbackCurrentValue = computeValueFromBukkitVersion();
+        return fallbackCurrentValue != null ? fallbackCurrentValue : 0;
+    }
+
     public boolean isLower(Version version) {
-        return getValue() < version.getValue();
+        Integer selfValue = getValue();
+        Integer otherValue = version.getValue();
+        if (selfValue == null || otherValue == null) return false;
+        return selfValue < otherValue;
     }
 
     public boolean isHigher(Version version) {
-        return getValue() > version.getValue();
+        Integer selfValue = getValue();
+        Integer otherValue = version.getValue();
+        if (selfValue == null || otherValue == null) return false;
+        return selfValue > otherValue;
     }
 
     public boolean isEqualOrLower(Version version) {
-        return getValue() <= version.getValue();
+        Integer selfValue = getValue();
+        Integer otherValue = version.getValue();
+        if (selfValue == null || otherValue == null) return false;
+        return selfValue <= otherValue;
     }
 
     public boolean isEqualOrHigher(Version version) {
-        return getValue() >= version.getValue();
+        Integer selfValue = getValue();
+        Integer otherValue = version.getValue();
+        if (selfValue == null || otherValue == null) return false;
+        return selfValue >= otherValue;
     }
 
     public static boolean isCurrentEqualOrHigher(Version v) {
-        return current.getValue() >= v.getValue();
+        return getCurrentVersionValue() >= v.getValue();
     }
 
     public static boolean isCurrentHigher(Version v) {
-        return current.getValue() > v.getValue();
+        return getCurrentVersionValue() > v.getValue();
     }
 
     public static boolean isCurrentLower(Version v) {
-        return current.getValue() < v.getValue();
+        return getCurrentVersionValue() < v.getValue();
     }
 
     public static boolean isCurrentEqualOrLower(Version v) {
-        return current.getValue() <= v.getValue();
+        return getCurrentVersionValue() <= v.getValue();
     }
 
     public static boolean isCurrentEqual(Version v) {
-        return Objects.equals(current.getValue(), v.getValue());
+        Integer targetValue = v.getValue();
+        if (targetValue == null) return false;
+        return getCurrentVersionValue() == targetValue;
     }
 
     public static boolean isCurrentSubEqualOrHigher(int subVersion) {
@@ -247,28 +314,79 @@ public enum Version {
         return Version.subVersion == subVersion;
     }
 
+    /**
+     * Converts a Minecraft version string to a comparable integer.
+     *
+     * <p>For old-scheme versions ({@code "1.X.Y"}), segments are padded to 2 digits and
+     * concatenated — e.g. {@code "1.21.11"} → {@code 12111}.
+     *
+     * <p>For new-scheme versions ({@code "YY.R"} where YY ≥ 26), a compound value is
+     * computed that is guaranteed to be higher than any old-scheme value — e.g.
+     * {@code "26.2"} → {@code 260200}.
+     */
     public static Integer convertVersion(String v) {
         v = v.replaceAll("[^\\d.]", "");
-        int version = 0;
-        if (v.contains(".")) {
+        if (!v.contains(".")) {
+            try {
+                return Integer.parseInt(v);
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        String[] parts = v.split("\\.");
+        if (parts.length < 2) {
+            try {
+                return Integer.parseInt(v);
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+
+        int first;
+        try {
+            first = Integer.parseInt(parts[0]);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+
+        if (first == 1) {
+            // Old Minecraft versioning: "1.X.Y"
+            // Preserve original behavior — pad ALL segments (including "1") to 2 digits.
             StringBuilder lVersion = new StringBuilder();
-            for (String one : v.split("\\.")) {
+            for (String one : parts) {
                 String s = one;
                 if (s.length() == 1) s = "0" + s;
                 lVersion.append(s);
             }
 
             try {
-                version = Integer.parseInt(lVersion.toString());
+                return Integer.parseInt(lVersion.toString());
             } catch (Exception e) {
+                return 0;
             }
         } else {
-            try {
-                version = Integer.parseInt(v);
-            } catch (Exception e) {
+            // New Minecraft versioning (≥ 2026): "YY.R[.H]"
+            // Compute year*10000 + drop*100 + hotfix, which is always > any old-scheme value.
+            // Non-numeric or empty segments (e.g. "build" in Paper's "26.2.build.84") are
+            // safely skipped — only the first successfully parsed value in each position counts.
+            int year = first;
+            int drop = 0;
+            int hotfix = 0;
+            for (int i = 1; i < parts.length && i <= 2; i++) {
+                String part = parts[i];
+                if (part.isEmpty()) continue;
+                try {
+                    int val = Integer.parseInt(part);
+                    if (i == 1) drop = val;
+                    else hotfix = val;
+                } catch (NumberFormatException ignored) {
+                    // Non-numeric segment (e.g. "build") — stop parsing further
+                    break;
+                }
             }
+            return year * 10000 + drop * 100 + hotfix;
         }
-        return version;
     }
 
     public static String deconvertVersion(Integer v) {
